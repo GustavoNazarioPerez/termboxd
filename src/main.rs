@@ -1,6 +1,7 @@
 mod log;
 mod movies;
 mod parser;
+mod user;
 
 fn main() {
     let username = String::from("funnyguygus");
