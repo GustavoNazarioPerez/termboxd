@@ -1,6 +1,7 @@
 mod log;
 mod movies;
 mod parser;
+mod ui;
 mod user;
 
 fn main() {
