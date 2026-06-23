@@ -1,6 +1,6 @@
 # termboxd
 
-Simple TUI for Letterboxd.
+TUI for Letterboxd.
 
 ### Demo
 ![Home tab](demo/home.jpg)
