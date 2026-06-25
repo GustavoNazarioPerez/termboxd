@@ -64,14 +64,16 @@ impl Movie {
         )?;
         let results = res.results.unwrap_or_default();
 
-        // Explicitly return in the case of an empty movie search result
-        if results.len() == 0 {
-            return Ok(None);
-        }
+        let year = self.year.to_string();
+        let best_match = results
+            .iter()
+            .find(|r| {
+                r.title.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(&self.name))
+                    && r.release_date.as_deref().is_some_and(|d| d.starts_with(&year))
+            })
+            .or(results.first());
 
-        let first = &results[0];
-        let path = &first.poster_path;
-        match path {
+        match best_match.and_then(|m| m.poster_path.as_ref()) {
             Some(value) => Ok(Some(value.to_string())),
             None => Ok(None),
         }
