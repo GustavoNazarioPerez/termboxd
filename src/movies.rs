@@ -3,6 +3,20 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::Widget};
 use std::env;
 use tmdb_client::apis::client::APIClient;
 
+pub fn strip_html_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(c),
+            _ => {}
+        }
+    }
+    result
+}
+
 #[derive(Default)]
 pub struct Stats {
     pub watched_count: u32,

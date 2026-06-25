@@ -1,12 +1,13 @@
-use crate::movies::{PosterWidget, Stats};
+use crate::log;
+use crate::movies::{Movie, PosterWidget, Stats, strip_html_tags};
 use crate::user::User;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use image::DynamicImage;
 use ratatui::symbols;
-use ratatui::widgets::Tabs;
+use ratatui::widgets::{Row, Table, TableState, Tabs};
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Style, Stylize},
     text::Line,
     widgets::{Bar, BarChart, Block, Borders, Paragraph, Wrap},
@@ -15,6 +16,7 @@ use ratatui::{
 const LABELS: [&str; 11] = [
     "0", ".5", "1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5",
 ];
+const BAR_WIDTH: u16 = 4;
 
 #[derive(Default)]
 pub struct App {
@@ -23,16 +25,22 @@ pub struct App {
     favorites: Vec<DynamicImage>,
     stats: Stats,
     selected_tab: usize,
+    diary_table_state: TableState,
 }
 
 impl App {
     pub fn new(user: User, favorites: Vec<DynamicImage>, stats: Stats) -> Self {
+        let mut diary_table_state = TableState::default();
+        diary_table_state.select_first();
+        diary_table_state.select_first_column();
+
         Self {
             running: true,
             user,
             favorites,
             stats,
             selected_tab: 0,
+            diary_table_state: diary_table_state,
         }
     }
 
@@ -45,17 +53,67 @@ impl App {
         Ok(())
     }
 
-    fn render_text_block(frame: &mut Frame, area: Rect, title: &str, color: Color, text: String) {
+    fn render_text_block(
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        color: Color,
+        header: &str,
+        body: &str,
+    ) {
         let block = Block::bordered()
             .title(title)
             .border_style(Style::default().fg(color));
-        let inner = block.inner(area);
+        let inner = block.inner(area).inner(Margin::new(1, 1));
         frame.render_widget(block, area);
 
+        let header_lines = Paragraph::new(header.to_string())
+            .wrap(Wrap { trim: true })
+            .line_count(inner.width) as u16;
+        let body_budget = inner.height.saturating_sub(header_lines);
+        let body = Self::fit_text(body, inner.width, body_budget);
+
+        let text = if body.is_empty() {
+            header.to_string()
+        } else {
+            format!("{header}\n{body}")
+        };
         let paragraph = Paragraph::new(text).centered().wrap(Wrap { trim: true });
         let line_count = paragraph.line_count(inner.width) as u16;
         let text_rect = inner.centered_vertically(Constraint::Length(line_count));
         frame.render_widget(paragraph, text_rect);
+    }
+
+    /// Truncates `text` (appending "...") to the longest prefix that wraps to at most
+    /// `max_lines` lines at the given `width`, using ratatui's own wrapping so it always
+    /// matches what will actually render.
+    fn fit_text(text: &str, width: u16, max_lines: u16) -> String {
+        if max_lines == 0 || text.is_empty() {
+            return String::new();
+        }
+        let fits = |s: &str| {
+            Paragraph::new(s.to_string())
+                .wrap(Wrap { trim: true })
+                .line_count(width) as u16
+                <= max_lines
+        };
+        if fits(text) {
+            return text.to_string();
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+        let mut lo = 0;
+        let mut hi = chars.len();
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            let candidate = format!("{}...", chars[..mid].iter().collect::<String>());
+            if fits(&candidate) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        format!("{}...", chars[..lo].iter().collect::<String>())
     }
 
     fn render(&mut self, frame: &mut Frame) {
@@ -119,11 +177,109 @@ impl App {
     }
 
     fn render_diary(&mut self, frame: &mut Frame, area: Rect) {
-        let w = Paragraph::new("diary")
-            .block(Block::bordered().title("diary"))
-            .centered()
-            .style(Color::White);
-        frame.render_widget(w, area);
+        let full_profile = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Percentage(52), Constraint::Percentage(48)])
+            .split(area);
+
+        let diary_list_block = Block::bordered().title("Movies").style(Color::White);
+        let inner = diary_list_block.inner(full_profile[0]);
+        frame.render_widget(diary_list_block, full_profile[0]);
+        Self::render_movie_table(frame, inner, &self.user.diary, &mut self.diary_table_state);
+
+        let selected = self
+            .diary_table_state
+            .selected()
+            .and_then(|i| self.user.diary.get(i));
+        Self::render_movie_panel(frame, full_profile[1], selected);
+    }
+
+    fn render_movie_panel(frame: &mut Frame, area: Rect, movie: Option<&Movie>) {
+        let block = Block::bordered().title("Movie Info").style(Color::White);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let movie = match movie {
+            Some(m) => m,
+            None => {
+                let paragraph = Paragraph::new("No movie selected").centered();
+                frame.render_widget(paragraph, inner.centered_vertically(Constraint::Length(1)));
+                return;
+            }
+        };
+
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Length(20), Constraint::Min(0)])
+            .split(inner);
+
+        let poster_area = sections[0].inner(Margin::new(0, 1));
+        let poster_rect = poster_area.centered_horizontally(Constraint::Length(25));
+        match movie.get_poster() {
+            Ok(Some(img)) => frame.render_widget(PosterWidget { img }, poster_rect),
+            Ok(None) => (),
+            Err(_) => log::log_error("Failed to get poster"),
+        }
+
+        let rating = match movie.rating {
+            Some(r) => r.to_string(),
+            None => String::from("-"),
+        };
+
+        let review = match movie.review.as_deref() {
+            Some(review) => strip_html_tags(review),
+            None => String::from("No review"),
+        };
+
+        let header = format!("{} ({})\nRating: {}", movie.name, movie.year, rating);
+        let header_lines = Paragraph::new(header.clone())
+            .wrap(Wrap { trim: true })
+            .line_count(sections[1].width) as u16;
+        let body_budget = sections[1].height.saturating_sub(header_lines + 1);
+        let review = Self::fit_text(&review, sections[1].width, body_budget);
+
+        let text = format!("{header}\n\n{review}");
+        let paragraph = Paragraph::new(text).centered().wrap(Wrap { trim: true });
+        let line_count = paragraph.line_count(sections[1].width) as u16;
+        let text_rect = sections[1].centered_vertically(Constraint::Length(line_count));
+        frame.render_widget(paragraph, text_rect);
+    }
+
+    pub fn render_movie_table(
+        frame: &mut Frame,
+        area: Rect,
+        m: &[Movie],
+        table_state: &mut TableState,
+    ) {
+        let header = Row::new(["Title", "Year", "Rating"])
+            .style(Style::new().bold())
+            .bottom_margin(1);
+
+        let rows: Vec<Row> = m
+            .iter()
+            .map(|movie| {
+                let rating = match movie.rating {
+                    Some(r) => r.to_string(),
+                    None => String::from("-"),
+                };
+                Row::new([movie.name.clone(), movie.year.to_string(), rating])
+            })
+            .collect();
+        let widths = [
+            Constraint::Percentage(50),
+            Constraint::Percentage(30),
+            Constraint::Percentage(10),
+        ];
+        let table = Table::new(rows, widths)
+            .header(header)
+            .column_spacing(1)
+            .style(Color::White)
+            .row_highlight_style(Style::new().on_black().bold())
+            .column_highlight_style(Color::Gray)
+            .cell_highlight_style(Style::new().reversed().light_blue())
+            .highlight_symbol("🍿 ");
+
+        frame.render_stateful_widget(table, area, table_state);
     }
 
     fn render_watchlist(&mut self, frame: &mut Frame, area: Rect) {
@@ -145,30 +301,29 @@ impl App {
     fn render_homepage(&mut self, frame: &mut Frame, area: Rect) {
         let full_profile = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Percentage(25), Constraint::Percentage(75)])
+            .constraints(vec![Constraint::Percentage(30), Constraint::Percentage(70)])
             .split(area);
+        let barchart_panel_width = LABELS.len() as u16 * (BAR_WIDTH + 1) - 1 + 2;
         let info_and_status = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(vec![
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(60),
+                Constraint::Min(10),
+                Constraint::Length(24),
+                Constraint::Length(barchart_panel_width),
             ])
             .split(full_profile[0]);
 
-        let profile_text = format!(
-            "@{}\n{}\n📍 {}\n\n{}",
-            self.user.profile.username,
-            self.user.profile.pronoun,
-            self.user.profile.location,
-            self.user.profile.bio
+        let profile_header = format!(
+            "@{}\n{}\n📍 {}",
+            self.user.profile.username, self.user.profile.pronoun, self.user.profile.location
         );
         Self::render_text_block(
             frame,
             info_and_status[0],
             "Info",
             Color::Rgb(255, 128, 0),
-            profile_text,
+            &profile_header,
+            &self.user.profile.bio,
         );
 
         let stats_text = format!(
@@ -183,7 +338,8 @@ impl App {
             info_and_status[1],
             "Stats",
             Color::Rgb(0, 224, 84),
-            stats_text,
+            &stats_text,
+            "",
         );
 
         Self::render_vertical_barchart(frame, info_and_status[2], &self.stats.ratings);
@@ -210,10 +366,10 @@ impl App {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let content_width = bars.len() as u16 * (6 + 1) - 1;
+        let content_width = bars.len() as u16 * (BAR_WIDTH + 1) - 1;
         let chart_rect = inner.centered_horizontally(Constraint::Length(content_width));
 
-        let chart = BarChart::vertical(bars).bar_width(6);
+        let chart = BarChart::vertical(bars).bar_width(BAR_WIDTH);
         frame.render_widget(chart, chart_rect);
     }
 
@@ -226,7 +382,7 @@ impl App {
         let layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(constraints)
-            .margin(2)
+            .margin(1)
             .spacing(2)
             .split(inner);
 
@@ -255,6 +411,14 @@ impl App {
             (_, KeyCode::Char('D') | KeyCode::Char('d')) => self.selected_tab = 1,
             (_, KeyCode::Char('W') | KeyCode::Char('w')) => self.selected_tab = 2,
             (_, KeyCode::Char('V') | KeyCode::Char('v')) => self.selected_tab = 3,
+            (_, KeyCode::Char('j') | KeyCode::Down) => match self.selected_tab {
+                1 => self.diary_table_state.select_next(),
+                _ => {}
+            },
+            (_, KeyCode::Char('k') | KeyCode::Up) => match self.selected_tab {
+                1 => self.diary_table_state.select_previous(),
+                _ => {}
+            },
             _ => {}
         }
     }
