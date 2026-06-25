@@ -1,3 +1,8 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::thread::spawn;
+use std::time::Duration;
+
 use crate::log;
 use crate::movies::{Movie, PosterWidget, Stats, strip_html_tags};
 use crate::user::User;
@@ -27,6 +32,10 @@ pub struct App {
     selected_tab: usize,
     diary_table_state: TableState,
     watchlist_table_state: TableState,
+    poster_cache: Arc<Mutex<HashMap<(String, i32), Option<DynamicImage>>>>,
+    pending_fetches: Arc<Mutex<HashSet<(String, i32)>>>,
+    diary_prefetch_cursor: usize,
+    watchlist_prefetch_cursor: usize,
 }
 
 impl App {
@@ -47,6 +56,10 @@ impl App {
             selected_tab: 0,
             diary_table_state: diary_table_state,
             watchlist_table_state: watchlist_table_state,
+            poster_cache: Arc::new(Mutex::new(HashMap::new())),
+            pending_fetches: Arc::new(Mutex::new(HashSet::new())),
+            diary_prefetch_cursor: 0,
+            watchlist_prefetch_cursor: 0,
         }
     }
 
@@ -185,7 +198,7 @@ impl App {
     fn render_diary(&mut self, frame: &mut Frame, area: Rect) {
         let full_profile = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Percentage(52), Constraint::Percentage(48)])
+            .constraints(vec![Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(area);
 
         let diary_list_block = Block::bordered().title("Movies").style(Color::White);
@@ -193,14 +206,39 @@ impl App {
         frame.render_widget(diary_list_block, full_profile[0]);
         Self::render_movie_table(frame, inner, &self.user.diary, &mut self.diary_table_state);
 
+        let burst = if self.diary_prefetch_cursor == 0 {
+            10
+        } else {
+            1
+        };
+        Self::prefetch_window(
+            &self.user.diary,
+            &mut self.diary_prefetch_cursor,
+            burst,
+            &self.poster_cache,
+            &self.pending_fetches,
+        );
+
         let selected = self
             .diary_table_state
             .selected()
             .and_then(|i| self.user.diary.get(i));
-        Self::render_movie_panel(frame, full_profile[1], selected);
+        Self::render_movie_panel(
+            frame,
+            full_profile[1],
+            selected,
+            &self.poster_cache,
+            &self.pending_fetches,
+        );
     }
 
-    fn render_movie_panel(frame: &mut Frame, area: Rect, movie: Option<&Movie>) {
+    fn render_movie_panel(
+        frame: &mut Frame,
+        area: Rect,
+        movie: Option<&Movie>,
+        cache: &Arc<Mutex<HashMap<(String, i32), Option<DynamicImage>>>>,
+        pending: &Arc<Mutex<HashSet<(String, i32)>>>,
+    ) {
         let block = Block::bordered().title("Movie Info").style(Color::White);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -221,10 +259,21 @@ impl App {
 
         let poster_area = sections[0].inner(Margin::new(0, 1));
         let poster_rect = poster_area.centered_horizontally(Constraint::Length(25));
-        match movie.get_poster() {
-            Ok(Some(img)) => frame.render_widget(PosterWidget { img }, poster_rect),
-            Ok(None) => (),
-            Err(_) => log::log_error("Failed to get poster"),
+        Self::ensure_fetch_started(movie, cache, pending);
+
+        match cache
+            .lock()
+            .unwrap()
+            .get(&(movie.name.clone(), movie.year))
+            .cloned()
+        {
+            Some(Some(img)) => frame.render_widget(PosterWidget { img }, poster_rect),
+            Some(None) => {
+                frame.render_widget(Paragraph::new("No Poster Found").centered(), poster_rect)
+            }
+            None => {
+                frame.render_widget(Paragraph::new("Loading poster...").centered(), poster_rect)
+            }
         }
 
         let rating = match movie.rating {
@@ -304,11 +353,30 @@ impl App {
             &mut self.watchlist_table_state,
         );
 
+        let burst = if self.diary_prefetch_cursor == 0 {
+            10
+        } else {
+            1
+        };
+        Self::prefetch_window(
+            &self.user.watchlist,
+            &mut self.watchlist_prefetch_cursor,
+            burst,
+            &self.poster_cache,
+            &self.pending_fetches,
+        );
+
         let selected = self
             .watchlist_table_state
             .selected()
             .and_then(|i| self.user.watchlist.get(i));
-        Self::render_movie_panel(frame, full_profile[1], selected);
+        Self::render_movie_panel(
+            frame,
+            full_profile[1],
+            selected,
+            &self.poster_cache,
+            &self.pending_fetches,
+        );
     }
 
     fn render_visualizer(&mut self, frame: &mut Frame, area: Rect) {
@@ -415,11 +483,14 @@ impl App {
     }
 
     fn handle_crossterm_events(&mut self) -> color_eyre::Result<()> {
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
-            Event::Mouse(_) => {}
-            Event::Resize(_, _) => {}
-            _ => {}
+        let timeout = Duration::from_millis(100);
+        if event::poll(timeout)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
+                Event::Mouse(_) => {}
+                Event::Resize(_, _) => {}
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -448,5 +519,50 @@ impl App {
 
     fn quit(&mut self) {
         self.running = false;
+    }
+
+    fn prefetch_window(
+        movies: &[Movie],
+        cursor: &mut usize,
+        count: usize,
+        cache: &Arc<Mutex<HashMap<(String, i32), Option<DynamicImage>>>>,
+        pending: &Arc<Mutex<HashSet<(String, i32)>>>,
+    ) {
+        let end = usize::min(*cursor + count, movies.len());
+        for m in &movies[*cursor..end] {
+            Self::ensure_fetch_started(m, cache, pending);
+        }
+        *cursor = end;
+    }
+
+    fn ensure_fetch_started(
+        movie: &Movie,
+        cache: &Arc<Mutex<HashMap<(String, i32), Option<DynamicImage>>>>,
+        pending: &Arc<Mutex<HashSet<(String, i32)>>>,
+    ) {
+        let key = (movie.name.clone(), movie.year);
+        if cache.lock().unwrap().contains_key(&key) {
+            return;
+        } else {
+            if !pending.lock().unwrap().insert(key.clone()) {
+                return;
+            } else {
+                let movie = movie.clone();
+                let cache = Arc::clone(cache);
+                let pending = Arc::clone(pending);
+                let key = key.clone();
+                spawn(move || {
+                    let poster = match movie.get_poster() {
+                        Ok(poster) => poster,
+                        Err(e) => {
+                            log::log_error(&format!("Failed to get poster: {e}"));
+                            None
+                        }
+                    };
+                    cache.lock().unwrap().insert(key.clone(), poster);
+                    pending.lock().unwrap().remove(&key);
+                });
+            }
+        }
     }
 }
