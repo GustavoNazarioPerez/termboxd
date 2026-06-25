@@ -254,11 +254,11 @@ impl App {
 
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Length(20), Constraint::Min(0)])
+            .constraints(vec![Constraint::Length(18), Constraint::Min(0)])
             .split(inner);
 
         let poster_area = sections[0].inner(Margin::new(0, 1));
-        let poster_rect = poster_area.centered_horizontally(Constraint::Length(25));
+        let poster_rect = poster_area.centered_horizontally(Constraint::Length(22));
         Self::ensure_fetch_started(movie, cache, pending);
 
         match cache
@@ -286,17 +286,19 @@ impl App {
             None => String::from("No review"),
         };
 
+        let text_area = sections[1].inner(Margin::new(1, 1));
+
         let header = format!("{} ({})\nRating: {}", movie.name, movie.year, rating);
         let header_lines = Paragraph::new(header.clone())
             .wrap(Wrap { trim: true })
-            .line_count(sections[1].width) as u16;
-        let body_budget = sections[1].height.saturating_sub(header_lines + 1);
-        let review = Self::fit_text(&review, sections[1].width, body_budget);
+            .line_count(text_area.width) as u16;
+        let body_budget = text_area.height.saturating_sub(header_lines + 1);
+        let review = Self::fit_text(&review, text_area.width, body_budget);
 
         let text = format!("{header}\n\n{review}");
         let paragraph = Paragraph::new(text).centered().wrap(Wrap { trim: true });
-        let line_count = paragraph.line_count(sections[1].width) as u16;
-        let text_rect = sections[1].centered_vertically(Constraint::Length(line_count));
+        let line_count = paragraph.line_count(text_area.width) as u16;
+        let text_rect = text_area.centered_vertically(Constraint::Length(line_count));
         frame.render_widget(paragraph, text_rect);
     }
 
