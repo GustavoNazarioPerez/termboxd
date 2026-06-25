@@ -26,6 +26,7 @@ pub struct App {
     stats: Stats,
     selected_tab: usize,
     diary_table_state: TableState,
+    watchlist_table_state: TableState,
 }
 
 impl App {
@@ -34,6 +35,10 @@ impl App {
         diary_table_state.select_first();
         diary_table_state.select_first_column();
 
+        let mut watchlist_table_state = TableState::default();
+        watchlist_table_state.select_first();
+        watchlist_table_state.select_first_column();
+
         Self {
             running: true,
             user,
@@ -41,6 +46,7 @@ impl App {
             stats,
             selected_tab: 0,
             diary_table_state: diary_table_state,
+            watchlist_table_state: watchlist_table_state,
         }
     }
 
@@ -283,11 +289,26 @@ impl App {
     }
 
     fn render_watchlist(&mut self, frame: &mut Frame, area: Rect) {
-        let w = Paragraph::new("watchlist")
-            .block(Block::bordered().title("watchlist"))
-            .centered()
-            .style(Color::White);
-        frame.render_widget(w, area);
+        let full_profile = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area);
+
+        let diary_list_block = Block::bordered().title("Movies").style(Color::White);
+        let inner = diary_list_block.inner(full_profile[0]);
+        frame.render_widget(diary_list_block, full_profile[0]);
+        Self::render_movie_table(
+            frame,
+            inner,
+            &self.user.watchlist,
+            &mut self.watchlist_table_state,
+        );
+
+        let selected = self
+            .watchlist_table_state
+            .selected()
+            .and_then(|i| self.user.watchlist.get(i));
+        Self::render_movie_panel(frame, full_profile[1], selected);
     }
 
     fn render_visualizer(&mut self, frame: &mut Frame, area: Rect) {
@@ -413,10 +434,12 @@ impl App {
             (_, KeyCode::Char('V') | KeyCode::Char('v')) => self.selected_tab = 3,
             (_, KeyCode::Char('j') | KeyCode::Down) => match self.selected_tab {
                 1 => self.diary_table_state.select_next(),
+                2 => self.watchlist_table_state.select_next(),
                 _ => {}
             },
             (_, KeyCode::Char('k') | KeyCode::Up) => match self.selected_tab {
                 1 => self.diary_table_state.select_previous(),
+                2 => self.watchlist_table_state.select_previous(),
                 _ => {}
             },
             _ => {}
