@@ -3,7 +3,7 @@
 TUI for Letterboxd.
 
 ### Demo
-![Home tab](demo/home.jpg)
+https://github.com/user-attachments/assets/575c872c-51a9-4416-8974-ea7c2aac7e89
 
 ### Requirements
 Currently this project expects
