@@ -53,9 +53,10 @@ impl Movie {
     fn get_poster_path(&self) -> Result<Option<String>, tmdb_client::Error> {
         let tmdb_api_key = env::var("TMDB_API_KEY").expect("ERROR: TMDB API key failure");
         let client = APIClient::new_with_api_key(tmdb_api_key);
+        let year = if self.year > 0 { Some(self.year) } else { None };
         let res = client.search_api().get_search_movie_paginated(
             &self.name,
-            Some(self.year),
+            year,
             None,
             None,
             None,
