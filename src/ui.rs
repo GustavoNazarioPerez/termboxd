@@ -4,7 +4,7 @@ use std::thread::spawn;
 use std::time::Duration;
 
 use crate::log;
-use crate::movies::{Movie, PosterWidget, Stats, strip_html_tags};
+use crate::movies::{Movie, PosterWidget, strip_html_tags};
 use crate::user::User;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use image::DynamicImage;
@@ -27,8 +27,7 @@ const BAR_WIDTH: u16 = 4;
 pub struct App {
     running: bool,
     user: User,
-    favorites: Vec<DynamicImage>,
-    stats: Stats,
+    favorites: Arc<Mutex<Vec<Option<DynamicImage>>>>,
     selected_tab: usize,
     diary_table_state: TableState,
     watchlist_table_state: TableState,
@@ -41,7 +40,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(user: User, favorites: Vec<DynamicImage>, stats: Stats) -> Self {
+    pub fn new(user: User, favorites: Arc<Mutex<Vec<Option<DynamicImage>>>>) -> Self {
         let mut diary_table_state = TableState::default();
         diary_table_state.select_first();
         diary_table_state.select_first_column();
@@ -54,7 +53,6 @@ impl App {
             running: true,
             user,
             favorites,
-            stats,
             selected_tab: 0,
             diary_table_state: diary_table_state,
             watchlist_table_state: watchlist_table_state,
@@ -208,25 +206,20 @@ impl App {
         let diary_list_block = Block::bordered().title("Movies").style(Color::White);
         let inner = diary_list_block.inner(full_profile[0]);
         frame.render_widget(diary_list_block, full_profile[0]);
-        Self::render_movie_table(frame, inner, &self.user.diary, &mut self.diary_table_state);
+        let diary_arc = Arc::clone(&self.user.diary);
+        let diary = diary_arc.lock().unwrap();
+        Self::render_movie_table(frame, inner, &diary, &mut self.diary_table_state);
 
-        let burst = if self.diary_prefetch_cursor == 0 {
-            10
-        } else {
-            1
-        };
+        let burst = if self.diary_prefetch_cursor == 0 { 10 } else { 1 };
         Self::prefetch_window(
-            &self.user.diary,
+            &diary,
             &mut self.diary_prefetch_cursor,
             burst,
             &self.poster_cache,
             &self.pending_fetches,
         );
 
-        let selected = self
-            .diary_table_state
-            .selected()
-            .and_then(|i| self.user.diary.get(i));
+        let selected = self.diary_table_state.selected().and_then(|i| diary.get(i));
         Self::render_movie_panel(
             frame,
             full_profile[1],
@@ -337,30 +330,20 @@ impl App {
         let diary_list_block = Block::bordered().title("Movies").style(Color::White);
         let inner = diary_list_block.inner(full_profile[0]);
         frame.render_widget(diary_list_block, full_profile[0]);
-        Self::render_movie_table(
-            frame,
-            inner,
-            &self.user.watchlist,
-            &mut self.watchlist_table_state,
-        );
+        let watchlist_arc = Arc::clone(&self.user.watchlist);
+        let watchlist = watchlist_arc.lock().unwrap();
+        Self::render_movie_table(frame, inner, &watchlist, &mut self.watchlist_table_state);
 
-        let burst = if self.diary_prefetch_cursor == 0 {
-            10
-        } else {
-            1
-        };
+        let burst = if self.watchlist_prefetch_cursor == 0 { 10 } else { 1 };
         Self::prefetch_window(
-            &self.user.watchlist,
+            &watchlist,
             &mut self.watchlist_prefetch_cursor,
             burst,
             &self.poster_cache,
             &self.pending_fetches,
         );
 
-        let selected = self
-            .watchlist_table_state
-            .selected()
-            .and_then(|i| self.user.watchlist.get(i));
+        let selected = self.watchlist_table_state.selected().and_then(|i| watchlist.get(i));
         Self::render_movie_panel(
             frame,
             full_profile[1],
@@ -434,13 +417,24 @@ impl App {
             &self.user.profile.bio,
         );
 
+        let diary = self.user.diary.lock().unwrap();
+        let watchlist_count = self.user.watchlist.lock().unwrap().len();
+        let likes = *self.user.likes.lock().unwrap();
+        let mut ratings: [u64; 11] = [0; 11];
+        for mov in diary.iter() {
+            let rating = mov.rating.unwrap_or(-1.0);
+            if rating >= 0.0 {
+                ratings[(rating * 2.0) as usize] += 1;
+            }
+        }
         let stats_text = format!(
-            "Movies Seen: {}\n Watchlist Size: {}\nLikes: {}\n5 Star Ratings: {}",
-            self.stats.watched_count,
-            self.stats.watchlist_count,
-            self.stats.likes,
-            self.stats.ratings[10]
+            "Movies Seen: {}\nWatchlist Size: {}\nLikes: {}\n5 Star Ratings: {}",
+            diary.len(),
+            watchlist_count,
+            likes,
+            ratings[10]
         );
+        drop(diary);
         Self::render_text_block(
             frame,
             info_and_status[1],
@@ -450,10 +444,11 @@ impl App {
             "",
         );
 
-        Self::render_vertical_barchart(frame, info_and_status[2], &self.stats.ratings);
+        Self::render_vertical_barchart(frame, info_and_status[2], &ratings);
 
-        if !self.favorites.is_empty() {
-            Self::render_favorites(frame, full_profile[1], &self.favorites);
+        let favorites = self.favorites.lock().unwrap();
+        if !favorites.is_empty() {
+            Self::render_favorites(frame, full_profile[1], &favorites);
         }
     }
 
@@ -481,7 +476,7 @@ impl App {
         frame.render_widget(chart, chart_rect);
     }
 
-    fn render_favorites(frame: &mut Frame, area: Rect, favorites: &[DynamicImage]) {
+    fn render_favorites(frame: &mut Frame, area: Rect, favorites: &[Option<DynamicImage>]) {
         let favorites_block = Block::bordered().title("Favorites").style(Color::White);
         let inner = favorites_block.inner(area);
         frame.render_widget(favorites_block, area);
@@ -494,10 +489,12 @@ impl App {
             .spacing(2)
             .split(inner);
 
-        for (idx, movie) in favorites.iter().enumerate() {
+        for (idx, slot) in favorites.iter().enumerate() {
             let rect = layout[idx];
-            let pw = PosterWidget { img: movie.clone() };
-            frame.render_widget(pw, rect);
+            match slot {
+                Some(img) => frame.render_widget(PosterWidget { img: img.clone() }, rect),
+                None => frame.render_widget(Block::bordered().dim(), rect),
+            }
         }
     }
 
