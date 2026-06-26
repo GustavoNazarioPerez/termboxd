@@ -17,14 +17,6 @@ pub fn strip_html_tags(text: &str) -> String {
     result
 }
 
-#[derive(Default)]
-pub struct Stats {
-    pub watched_count: u32,
-    pub watchlist_count: u32,
-    pub likes: u32,
-    pub ratings: [u64; 11],
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum PosterError {
     #[error("tmdb error: {0}")]
